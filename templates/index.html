@@ -96,5 +96,8 @@
         
         <input type="submit" value="Criar Mapa">
     </form>
+    {% if mapa_gerado %}
+        <iframe src="{{ url_for('static', filename='mapa_deslocamento.html') }}" width="100%" height="600px"></iframe>
+    {% endif %}
 </body>
 </html>

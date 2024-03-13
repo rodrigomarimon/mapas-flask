@@ -3,30 +3,48 @@ from folium.plugins import HeatMap
 import pandas as pd
 import folium
 import os
+from werkzeug.utils import secure_filename
+import platform
+import io
+from base64 import b64encode
+import webbrowser
+
+UPLOAD_FOLDER = 'uploads'
+ALLOWED_EXTENSIONS = {'csv'}
 
 app = Flask(__name__)
+app.config['UPLOAD_FOLDER'] = 'uploads'
+
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 df = pd.DataFrame()
-print(df)
 intervalo_minutos = 3
 
 def carregar_dataframe_csv(caminho):
     try:
+        print(f'tentando carregar o arquivo CSV {caminho}')
         global df
         df = pd.read_csv(caminho, encoding='ISO-8859-1')
-
+        
         # Verifique se as colunas 'Data' e 'Hora' existem no DataFrame
         if 'Data' not in df.columns or 'Hora' not in df.columns:
             raise ValueError("O arquivo CSV não contém as colunas 'Data' e 'Hora'.")
 
         # Crie a coluna 'DataHora' a partir das colunas 'Data' e 'Hora'
-        df['DataHora'] = pd.to_datetime(df['Data'] + ' ' + df['Hora'], format='%d/%m/%Y %I:%M:%S %p')
+        # df['DataHora'] = pd.to_datetime(df['Data'] + ' ' + df['Hora'], format='%d/%m/%Y %I:%M:%S %p')
+        df['DataHora'] = pd.to_datetime(df['Data'] + ' ' + df['Hora'], format='%d/%m/%Y %H:%M:%S')
 
         # Converta as colunas 'Latitude' e 'Longitude' para float
         df['Latitude'] = df['Latitude'].str.replace(',', '.').astype(float)
         df['Longitude'] = df['Longitude'].str.replace(',', '.').astype(float)
 
-        print(df)
+        # Verifique se a coluna 'DataHora' foi criada com sucesso
+        if 'DataHora' not in df.columns:
+            raise ValueError("A coluna 'DataHora' não foi criada com sucesso.")
+        
+        print("DataFrame carregado com sucesso")
+        print(df.head())
 
         return df
     except Exception as e:
@@ -35,6 +53,11 @@ def carregar_dataframe_csv(caminho):
 
 
 def criar_mapa(df_filtrado):
+    
+    print("Função criar_mapa chamada com DataFrame:")
+    print(df_filtrado)
+    if 'DataHora' not in df_filtrado.columns:
+        print("A coluna 'DataHora' não está presente no DataFrame")
     mapa = folium.Map(location=[df_filtrado.iloc[0]['Latitude'], df_filtrado.iloc[0]['Longitude']], zoom_start=14)
 
     df_velocidade_zero = df_filtrado[df_filtrado['Velocidade'] == 0]
@@ -50,25 +73,34 @@ def criar_mapa(df_filtrado):
             popup_content = f"{row['Placa']} - {row['Data']} {row['Hora']} - Velocidade: {row['Velocidade']} km/h - LatLong: {[latitude, longitude]}<br><a href='{google_maps_link}' target='_blank'>Ver no Google Maps</a>"
 
             marker = folium.Marker(location=[latitude, longitude],
-                                  popup=folium.Popup(popup_content, max_width=300)
-                                  ).add_to(mapa)
+                                    popup=folium.Popup(popup_content, max_width=300)
+                                    ).add_to(mapa)
 
             tempo_anterior = row['DataHora']
 
-    # Use um caminho relativo para salvar o mapa
-    mapa.save('static/mapa_deslocamento.html')
+    caminho_mapa = os.path.join(os.path.abspath(os.path.dirname(__file__)), 'static', 'mapa_deslocamento.html')
+    mapa.save(caminho_mapa)
+    
+    return caminho_mapa
+from flask import send_from_directory
 
-def escolher_arquivo():
-    file_path = filedialog.askopenfilename(filetypes=[("Arquivos CSVs", "*.csv")])
-    if file_path:
-        global df
-        df = carregar_dataframe_csv(file_path)
+@app.route('/mapa_deslocamento')
+def mapa_deslocamento():
+    return render_template('mapa_deslocamento.html')
 
 @app.route('/', methods=['GET', 'POST'])
 def index():
     global df
 
+    mapa_gerado = False
+    caminho_mapa = None
+    
     if request.method == 'POST':
+        print("Método POST detectado")
+        print("Dados do formulário:")
+        print(request.form)
+        print("Arquivos enviados:")
+        print(request.files)
         data_inicial = request.form['data_inicial']
         hora_inicial = request.form['hora_inicial']
         data_final = request.form['data_final']
@@ -76,18 +108,54 @@ def index():
 
         if not all([data_inicial, hora_inicial, data_final, hora_final]):
             return render_template('index.html', mapa_gerado=False, mensagem_erro="Forneça todas datas e horas")
-
-        filtro = ((df['DataHora'] >= pd.to_datetime(f'{data_inicial} {hora_inicial}', format='%Y-%m-%d %H:%M:%S')) &
-                  (df['DataHora'] <= pd.to_datetime(f'{data_final} {hora_final}', format='%Y-%m-%d %H:%M:%S')))
-        df_filtrado = df[filtro].copy()
-
-        if df_filtrado.empty:
-            return render_template('index.html', mapa_gerado=False, mensagem_erro=f"Não há dados no intervalo de datas especificado: {data_inicial} {hora_inicial} - {data_final} {hora_final}")
+        if 'arquivo_csv' not in request.files:
+            return render_template('index.html', mapa_gerado=False, mensagem_erro="Nenhum arquivo enviado")
         
-        criar_mapa(df_filtrado)
-        return render_template('index.html', mapa_gerado=True)
+        file = request.files['arquivo_csv']
 
-    return render_template('index.html', mapa_gerado=False)
+
+        if file.filename == '':
+            return render_template('index.html', mapa_gerado=False, mensagemm_erro="Nenhum arquivo enviado")
+        
+        if file and allowed_file(file.filename):
+            filename = secure_filename(file.filename)
+            os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+            file.save(os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(filename)))
+            os.makedirs('static', exist_ok=True)
+
+
+            # Certifique-se de que o diretório 'uploads' exista
+            
+            df = carregar_dataframe_csv(os.path.join(app.config['UPLOAD_FOLDER'], filename))
+
+            filtro = ((df['DataHora'] >= pd.to_datetime(f'{data_inicial} {hora_inicial}', format='%Y-%m-%d %H:%M:%S')) &
+                    (df['DataHora'] <= pd.to_datetime(f'{data_final} {hora_final}', format='%Y-%m-%d %H:%M:%S')))
+            df_filtrado = df[filtro].copy()
+            print(df_filtrado)
+            
+            if df_filtrado.empty:
+                return render_template('index.html', mapa_gerado=False, mensagem_erro=f"Não há dados no intervalo de datas especificado: {data_inicial} {hora_inicial} - {data_final} {hora_final}")
+            
+            caminho_mapa = criar_mapa(df_filtrado)
+            mapa_gerado = True
+
+    return render_template('index.html', mapa_gerado=mapa_gerado, caminho_mapa=caminho_mapa)
+
+def abrir_mapa_no_navegador():
+    # Determine o sistema operacional:
+    sistema_operacional = platform.system()
+
+    # caminho do arquyivo html gerado:
+    caminho_arquivo_html = os.path.join('static', 'mapa_deslocamento.html')
+
+    # abra o arquivo no navegador padrão combase no sistema operacional
+    if sistema_operacional == 'Windows':
+        os.startfile(caminho_arquivo_html)
+    elif sistema_operacional =='Linux':
+        os.system('xdg-open' + caminho_arquivo_html)
+    else:
+        print('Sistema operacional não suportado')
 
 if __name__ == '__main__':
     app.run(debug=True)
+    abrir_mapa_no_navegador()
